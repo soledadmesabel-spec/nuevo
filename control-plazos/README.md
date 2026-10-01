@@ -1,4 +1,4 @@
-# Control de Plazos de Expedientes (Google Apps Script)
+# Control de Plazos de Expedientes (Google Apps Script) – v1.1
 
 Aplicativo web que lee la hoja de Google Sheets con los expedientes y muestra
 **los expedientes admitidos y el plazo que tiene cada tramitador** (SECRETARIO).
@@ -41,7 +41,43 @@ Al recargar la hoja aparece el menú **Control de Plazos**:
 - *Actualizar fecha límite y estado*: escribe G y H con el estado según la fecha de hoy.
 - *Abrir panel*: abre el aplicativo dentro de la misma hoja.
 
-Para que el estado se actualice solo cada mañana, ejecute una vez `crearActivadorDiario`.
+- *Enviar alertas de vencidos por correo*: envía las alertas (pide confirmación).
+
+Para que cada mañana a las 7 a.m. se actualice la hoja **y se envíen las alertas**,
+ejecute una vez `crearActivadorDiario`.
+
+## Alertas por correo (novedad v1.1)
+
+- Cada tramitador recibe **un solo correo** con la tabla de todos sus expedientes vencidos
+  (no un correo por fila).
+- El supervisor recibe un **reporte general** con todos los vencidos, y un aviso de los
+  tramitadores que no tienen correo configurado.
+- Un expediente duplicado en la hoja se informa una sola vez.
+- Se pueden enviar desde el botón **✉ Enviar alertas** del panel, desde el menú de la hoja
+  o automáticamente con la rutina diaria (`ejecutarRutinaDiaria`).
+- Antes de enviar revisa la cuota diaria de correos de Google.
+
+Configure los correos al inicio de `Code.gs` (vacío = no se envía):
+
+```js
+CORREO_SUPERVISOR: 'supervisor@su-dominio.com',
+CORREOS_TRAMITADORES: {
+  'kenia': 'kenia@su-dominio.com',
+  'kevin': 'kevin@su-dominio.com',
+  'yeraldo': 'yeraldo@su-dominio.com'
+},
+```
+
+La clave es el nombre del tramitador **en minúsculas** tal como figura en la columna SECRETARIO.
+La primera vez Google pedirá un permiso nuevo para **enviar correos en su nombre**: acéptelo.
+
+![Ejemplo del reporte al supervisor](captura_correo.png)
+
+## Historial de versiones
+
+- **1.1** – Alertas por correo de expedientes vencidos (por tramitador y al supervisor),
+  botón en el panel, opción en el menú y rutina diaria automática.
+- **1.0** – Panel de expedientes admitidos y plazo por tramitador.
 
 ## Configuración (inicio de `Code.gs`)
 

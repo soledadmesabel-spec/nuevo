@@ -23,6 +23,10 @@
     main { padding: 20px 24px; max-width: 1300px; margin: 0 auto; }
     button { cursor: pointer; font: inherit; }
     .btn { background: #fff; color: var(--primary); border: 0; border-radius: 6px; padding: 8px 14px; font-weight: 600; }
+    .btn:disabled { opacity: .6; cursor: wait; }
+    .btn-alerta { background: var(--rojo-bg); color: var(--rojo); }
+    .acciones { display: flex; gap: 8px; flex-wrap: wrap; }
+    .version { opacity: .7; font-size: 12px; font-weight: 400; margin-left: 6px; }
     .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
     .tab { border: 1px solid var(--line); background: var(--card); border-radius: 20px; padding: 6px 14px; color: var(--text); }
     .tab.activo { background: var(--primary); color: #fff; border-color: var(--primary); }
@@ -68,10 +72,13 @@
 <body>
   <header>
     <div>
-      <h1>Control de Plazos de Expedientes</h1>
+      <h1>Control de Plazos de Expedientes<span class="version" id="version">v1.1</span></h1>
       <div class="sub" id="subtitulo">Cargando…</div>
     </div>
-    <button class="btn" id="btnRecargar">⟳ Actualizar</button>
+    <div class="acciones">
+      <button class="btn btn-alerta" id="btnNotificar">✉ Enviar alertas</button>
+      <button class="btn" id="btnRecargar">⟳ Actualizar</button>
+    </div>
   </header>
 
   <main>
@@ -153,6 +160,7 @@
         r.fechaLimiteIso = iso(r.fechaLimite);
         r.estadoOrden = ORDEN_ESTADO[r.estado.codigo];
       });
+      if (res.version) $('version').textContent = 'v' + res.version;
       $('subtitulo').textContent = 'Hoy: ' + res.hoy + ' · Plazo del tramitador: ' + res.plazoDias + ' días desde la asignación · ' + res.registros.length + ' registros en la hoja';
       llenarSelect('fTramitador', 'tramitador', 'Todos los tramitadores');
       llenarSelect('fDependencia', 'dependencia', 'Todas las dependencias');
@@ -266,6 +274,22 @@
 
     // ---- Eventos ----
     $('btnRecargar').onclick = cargar;
+    $('btnNotificar').onclick = function () {
+      var n = datos.registros.filter(function (r) { return r.estado.codigo === 'vencido'; }).length;
+      if (!n) { alert('No hay expedientes vencidos para notificar.'); return; }
+      if (!confirm('Se enviará un correo a cada tramitador con sus expedientes vencidos (' + n + ' en total, de todos los sentidos) y un reporte al supervisor.\n\n¿Continuar?')) return;
+      var btn = $('btnNotificar');
+      function fin(msg) { alert(msg); btn.disabled = false; btn.textContent = '✉ Enviar alertas'; }
+      btn.disabled = true; btn.textContent = 'Enviando…';
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(fin)
+          .withFailureHandler(function (e) { fin('Error al enviar correos: ' + (e.message || e)); })
+          .notificarExpedientesVencidos();
+      } else {
+        fin('Vista previa: no se envían correos fuera de Apps Script.');
+      }
+    };
     ['fTramitador', 'fEstado', 'fDependencia'].forEach(function (id) { $(id).onchange = pintar; });
     $('fBuscar').oninput = pintar;
     $('tabs').onclick = function (ev) {
