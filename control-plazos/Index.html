@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Control de Plazos</title>
+  <style>
+    :root {
+      --bg: #f4f6f9; --card: #fff; --text: #1f2937; --muted: #6b7280; --line: #e5e7eb;
+      --primary: #1e3a8a; --primary-soft: #e0e7ff;
+      --rojo: #b91c1c; --rojo-bg: #fee2e2;
+      --naranja: #b45309; --naranja-bg: #fef3c7;
+      --amarillo: #a16207; --amarillo-bg: #fef9c3;
+      --verde: #15803d; --verde-bg: #dcfce7;
+      --gris-bg: #f3f4f6;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+    header { background: var(--primary); color: #fff; padding: 16px 24px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 20px; }
+    header .sub { opacity: .85; font-size: 13px; }
+    main { padding: 20px 24px; max-width: 1300px; margin: 0 auto; }
+    button { cursor: pointer; font: inherit; }
+    .btn { background: #fff; color: var(--primary); border: 0; border-radius: 6px; padding: 8px 14px; font-weight: 600; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .tab { border: 1px solid var(--line); background: var(--card); border-radius: 20px; padding: 6px 14px; color: var(--text); }
+    .tab.activo { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .tab .n { opacity: .7; margin-left: 4px; }
+    .filtros { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+    .filtros select, .filtros input { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: #fff; min-width: 180px; }
+    .filtros input { flex: 1; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .kpi { background: var(--card); border-radius: 10px; padding: 14px 16px; border-left: 5px solid var(--primary); box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    .kpi .v { font-size: 28px; font-weight: 700; }
+    .kpi .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    .kpi.vencido { border-color: var(--rojo); } .kpi.vencido .v { color: var(--rojo); }
+    .kpi.proximo { border-color: var(--naranja); } .kpi.proximo .v { color: var(--naranja); }
+    .kpi.plazo { border-color: var(--verde); } .kpi.plazo .v { color: var(--verde); }
+    h2 { font-size: 16px; margin: 22px 0 10px; }
+    .tramitadores { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+    .tram { background: var(--card); border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.05); border: 2px solid transparent; cursor: pointer; }
+    .tram.sel { border-color: var(--primary); }
+    .tram .nom { font-weight: 700; font-size: 16px; display: flex; justify-content: space-between; }
+    .tram .tot { background: var(--primary-soft); color: var(--primary); border-radius: 12px; padding: 0 10px; font-size: 13px; }
+    .tram .fila { display: flex; justify-content: space-between; margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .tram .fila b { color: var(--text); }
+    .tabla-wrap { background: var(--card); border-radius: 10px; overflow-x: auto; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    table { width: 100%; border-collapse: collapse; min-width: 860px; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { background: #f9fafb; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); cursor: pointer; user-select: none; }
+    tr:hover td { background: #fafafa; }
+    td.exp { font-weight: 600; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .b-vencido { background: var(--rojo-bg); color: var(--rojo); }
+    .b-hoy { background: var(--naranja-bg); color: var(--naranja); }
+    .b-proximo { background: var(--amarillo-bg); color: var(--amarillo); }
+    .b-plazo { background: var(--verde-bg); color: var(--verde); }
+    .b-sin { background: var(--gris-bg); color: var(--muted); }
+    .dup { background: var(--naranja-bg); color: var(--naranja); font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; font-weight: 600; }
+    .vacio, .cargando, .error { padding: 30px; text-align: center; color: var(--muted); }
+    .error { color: var(--rojo); }
+    .aviso { background: var(--amarillo-bg); color: var(--amarillo); padding: 8px 12px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
+    @media (max-width: 600px) { main { padding: 14px 12px; } header { padding: 14px 16px; } .filtros select, .filtros input { min-width: 0; width: 100%; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Control de Plazos de Expedientes</h1>
+      <div class="sub" id="subtitulo">Cargando…</div>
+    </div>
+    <button class="btn" id="btnRecargar">⟳ Actualizar</button>
+  </header>
+
+  <main>
+    <div id="aviso"></div>
+    <div class="tabs" id="tabs"></div>
+
+    <div class="filtros">
+      <select id="fTramitador"><option value="">Todos los tramitadores</option></select>
+      <select id="fEstado">
+        <option value="">Todos los estados</option>
+        <option value="vencido">Plazo vencido</option>
+        <option value="hoy">Vence hoy</option>
+        <option value="proximo">Por vencer</option>
+        <option value="plazo">En plazo</option>
+      </select>
+      <select id="fDependencia"><option value="">Todas las dependencias</option></select>
+      <input id="fBuscar" type="search" placeholder="Buscar N° de expediente…">
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <h2>Plazo por tramitador</h2>
+    <div class="tramitadores" id="tramitadores"></div>
+
+    <h2 id="tituloTabla">Expedientes</h2>
+    <div class="tabla-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-k="expediente">N° Expediente</th>
+            <th data-k="sentido">Sentido</th>
+            <th data-k="dependencia">Dependencia</th>
+            <th data-k="tramitador">Tramitador</th>
+            <th data-k="secretarioInicial">Asignado por</th>
+            <th data-k="fechaAsignacionIso">F. asignación</th>
+            <th data-k="fechaLimiteIso">F. límite</th>
+            <th data-k="diasRestantes" class="num">Días</th>
+            <th data-k="estadoOrden">Estado</th>
+          </tr>
+        </thead>
+        <tbody id="cuerpo"><tr><td colspan="9" class="cargando">Cargando datos de la hoja…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    var datos = { registros: [] };
+    var estado = { sentido: 'Admite', orden: 'diasRestantes', asc: true };
+    var ORDEN_ESTADO = { vencido: 0, hoy: 1, proximo: 2, plazo: 3, sin: 4 };
+
+    function $(id) { return document.getElementById(id); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function iso(f) { var p = (f || '').split('-'); return p.length === 3 ? p[2] + p[1] + p[0] : ''; }
+    function textoDias(d) {
+      if (d === null) return '—';
+      if (d < 0) return 'Vencido hace ' + (-d) + (d === -1 ? ' día' : ' días');
+      if (d === 0) return 'Vence hoy';
+      return 'Quedan ' + d + (d === 1 ? ' día' : ' días');
+    }
+
+    function cargar() {
+      $('subtitulo').textContent = 'Cargando…';
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run.withSuccessHandler(recibir).withFailureHandler(function (e) {
+          $('cuerpo').innerHTML = '<tr><td colspan="9" class="error">Error: ' + esc(e.message || e) + '</td></tr>';
+          $('subtitulo').textContent = 'No se pudo leer la hoja';
+        }).obtenerExpedientes();
+      } else {
+        // Vista previa fuera de Apps Script: usa datos de ejemplo.
+        $('aviso').innerHTML = '<div class="aviso">Vista previa con datos de ejemplo. Publicado en Apps Script, el panel lee directamente la hoja de cálculo.</div>';
+        recibir(datosDemo());
+      }
+    }
+
+    function recibir(res) {
+      datos = res;
+      datos.registros.forEach(function (r) {
+        r.fechaAsignacionIso = iso(r.fechaAsignacion);
+        r.fechaLimiteIso = iso(r.fechaLimite);
+        r.estadoOrden = ORDEN_ESTADO[r.estado.codigo];
+      });
+      $('subtitulo').textContent = 'Hoy: ' + res.hoy + ' · Plazo del tramitador: ' + res.plazoDias + ' días desde la asignación · ' + res.registros.length + ' registros en la hoja';
+      llenarSelect('fTramitador', 'tramitador', 'Todos los tramitadores');
+      llenarSelect('fDependencia', 'dependencia', 'Todas las dependencias');
+      pintar();
+    }
+
+    function llenarSelect(id, campo, todos) {
+      var sel = $(id), actual = sel.value;
+      var vals = unicos(datos.registros.map(function (r) { return r[campo]; }));
+      sel.innerHTML = '<option value="">' + todos + '</option>' + vals.map(function (v) {
+        return '<option' + (v === actual ? ' selected' : '') + '>' + esc(v) + '</option>';
+      }).join('');
+    }
+
+    function unicos(arr) { return arr.filter(function (v, i) { return v && arr.indexOf(v) === i; }).sort(); }
+
+    function pintarTabs() {
+      var sentidos = unicos(datos.registros.map(function (r) { return r.sentido; }));
+      sentidos.sort(function (a, b) { return a === 'Admite' ? -1 : b === 'Admite' ? 1 : a.localeCompare(b); });
+      var html = sentidos.concat(['Todos']).map(function (s) {
+        var n = s === 'Todos' ? datos.registros.length : datos.registros.filter(function (r) { return r.sentido === s; }).length;
+        var etiqueta = s === 'Admite' ? 'Admitidos' : s;
+        return '<button class="tab' + (estado.sentido === s ? ' activo' : '') + '" data-s="' + esc(s) + '">' + esc(etiqueta) + '<span class="n">' + n + '</span></button>';
+      }).join('');
+      $('tabs').innerHTML = html;
+    }
+
+    function filtrados(ignorarTramitador) {
+      var t = $('fTramitador').value, e = $('fEstado').value, d = $('fDependencia').value;
+      var q = $('fBuscar').value.trim().toLowerCase();
+      return datos.registros.filter(function (r) {
+        return (estado.sentido === 'Todos' || r.sentido === estado.sentido)
+          && (ignorarTramitador || !t || r.tramitador === t)
+          && (!e || r.estado.codigo === e)
+          && (!d || r.dependencia === d)
+          && (!q || r.expediente.toLowerCase().indexOf(q) >= 0);
+      });
+    }
+
+    function pintar() {
+      pintarTabs();
+      var lista = filtrados(false);
+      pintarKpis(lista);
+      pintarTramitadores(filtrados(true));
+      pintarTabla(lista);
+      $('tituloTabla').textContent = (estado.sentido === 'Admite' ? 'Expedientes admitidos' : estado.sentido === 'Todos' ? 'Todos los expedientes' : 'Expedientes – ' + estado.sentido) + ' (' + lista.length + ')';
+    }
+
+    function contar(lista, cod) { return lista.filter(function (r) { return r.estado.codigo === cod; }).length; }
+
+    function pintarKpis(lista) {
+      var k = [
+        { c: '', v: lista.length, l: 'Expedientes' },
+        { c: 'vencido', v: contar(lista, 'vencido'), l: 'Plazo vencido' },
+        { c: 'proximo', v: contar(lista, 'hoy') + contar(lista, 'proximo'), l: 'Vence hoy / por vencer' },
+        { c: 'plazo', v: contar(lista, 'plazo'), l: 'En plazo' }
+      ];
+      $('kpis').innerHTML = k.map(function (x) {
+        return '<div class="kpi ' + x.c + '"><div class="v">' + x.v + '</div><div class="l">' + x.l + '</div></div>';
+      }).join('');
+    }
+
+    function pintarTramitadores(lista) {
+      var grupos = {};
+      lista.forEach(function (r) { (grupos[r.tramitador || 'Sin asignar'] = grupos[r.tramitador || 'Sin asignar'] || []).push(r); });
+      var sel = $('fTramitador').value;
+      var nombres = Object.keys(grupos).sort();
+      if (!nombres.length) { $('tramitadores').innerHTML = '<div class="vacio">Sin expedientes para los filtros elegidos.</div>'; return; }
+      $('tramitadores').innerHTML = nombres.map(function (n) {
+        var g = grupos[n];
+        var pend = g.filter(function (r) { return r.diasRestantes !== null && r.diasRestantes >= 0; })
+          .sort(function (a, b) { return a.diasRestantes - b.diasRestantes; });
+        var proximo = pend.length ? pend[0].fechaLimite + ' (' + textoDias(pend[0].diasRestantes).toLowerCase() + ')' : '—';
+        var masAtrasado = g.filter(function (r) { return r.diasRestantes !== null && r.diasRestantes < 0; })
+          .sort(function (a, b) { return a.diasRestantes - b.diasRestantes; })[0];
+        return '<div class="tram' + (sel === n ? ' sel' : '') + '" data-t="' + esc(n) + '">'
+          + '<div class="nom">' + esc(n) + '<span class="tot">' + g.length + '</span></div>'
+          + '<div class="fila">Vencidos <b style="color:var(--rojo)">' + contar(g, 'vencido') + '</b></div>'
+          + '<div class="fila">Vence hoy / por vencer <b style="color:var(--naranja)">' + (contar(g, 'hoy') + contar(g, 'proximo')) + '</b></div>'
+          + '<div class="fila">En plazo <b style="color:var(--verde)">' + contar(g, 'plazo') + '</b></div>'
+          + '<div class="fila">Próximo vencimiento <b>' + esc(proximo) + '</b></div>'
+          + (masAtrasado ? '<div class="fila">Más atrasado <b>' + esc(masAtrasado.expediente) + ' (' + (-masAtrasado.diasRestantes) + ' d)</b></div>' : '')
+          + '</div>';
+      }).join('');
+    }
+
+    function pintarTabla(lista) {
+      var k = estado.orden, s = estado.asc ? 1 : -1;
+      lista = lista.slice().sort(function (a, b) {
+        var x = a[k], y = b[k];
+        if (x === y) return 0;
+        if (x === null || x === undefined) return 1;
+        if (y === null || y === undefined) return -1;
+        return (x > y ? 1 : -1) * s;
+      });
+      if (!lista.length) { $('cuerpo').innerHTML = '<tr><td colspan="9" class="vacio">No hay expedientes para los filtros elegidos.</td></tr>'; return; }
+      $('cuerpo').innerHTML = lista.map(function (r) {
+        return '<tr>'
+          + '<td class="exp">' + esc(r.expediente) + (r.duplicado ? '<span class="dup" title="Registrado más de una vez en la hoja">duplicado</span>' : '') + '</td>'
+          + '<td>' + esc(r.sentido) + '</td>'
+          + '<td>' + esc(r.dependencia) + '</td>'
+          + '<td><b>' + esc(r.tramitador) + '</b></td>'
+          + '<td>' + esc(r.secretarioInicial) + '</td>'
+          + '<td>' + esc(r.fechaAsignacion) + '</td>'
+          + '<td>' + esc(r.fechaLimite) + '</td>'
+          + '<td class="num">' + esc(textoDias(r.diasRestantes)) + '</td>'
+          + '<td><span class="badge b-' + r.estado.codigo + '">' + esc(r.estado.etiqueta) + '</span></td>'
+          + '</tr>';
+      }).join('');
+    }
+
+    // ---- Eventos ----
+    $('btnRecargar').onclick = cargar;
+    ['fTramitador', 'fEstado', 'fDependencia'].forEach(function (id) { $(id).onchange = pintar; });
+    $('fBuscar').oninput = pintar;
+    $('tabs').onclick = function (ev) {
+      var b = ev.target.closest('.tab'); if (!b) return;
+      estado.sentido = b.getAttribute('data-s'); pintar();
+    };
+    $('tramitadores').onclick = function (ev) {
+      var c = ev.target.closest('.tram'); if (!c) return;
+      var n = c.getAttribute('data-t');
+      $('fTramitador').value = $('fTramitador').value === n ? '' : n; pintar();
+    };
+    document.querySelector('thead').onclick = function (ev) {
+      var th = ev.target.closest('th'); if (!th) return;
+      var k = th.getAttribute('data-k');
+      estado.asc = estado.orden === k ? !estado.asc : true; estado.orden = k; pintarTabla(filtrados(false));
+    };
+
+    // ---- Datos de ejemplo para vista previa local (mismas reglas que Code.gs) ----
+    function datosDemo() {
+      var filas = [
+        ['Diana','5949-2026','Admite','1ero','02-09-2026','kenia'],['Diana','1471-2026','Admite','7mo','20-08-2026','Kevin'],
+        ['Diana','2203-2026','Improcedente','1ero','25-08-2026','Kenia'],['Diana','5266-2024','Desistimiento','7mo','25-08-2026','Yeraldo'],
+        ['Diana','3418-2024-20','Improcedente','7mo','25-08-2026','Kevin'],['Glenda','5226-2025','Improcedente','1ro','27-08-2026','kenia'],
+        ['Glenda','5667-2026','Improcedente','1ro','27-08-2026','Yeraldo'],['Diana','5661-2026-28','concede','1ero','28-08-2026','Kevin'],
+        ['Diana','2956-2026','Improcedente','1ero','31-08-2026','Kenia'],['Diana','5759-2026','Admite','1ero','31-08-2026','Yeraldo'],
+        ['Glenda','5948-2026-56','concede','1ro','31-08-2026','Kevin'],['Diana','2317-2026','Improcedente','1ero','31-08-2026','Kenia'],
+        ['Diana','1981-2026','Improcedente','7mo','31-08-2026','Yeraldo'],['Diana','5454-2026','incompetencia','1ero','31-08-2026','Kevin'],
+        ['Glenda','5845-2026-28','concede','7mo','31-08-2026','Kenia'],['Diana','5745-2026','improcedente','7mo','31-08-2026','Yeraldo'],
+        ['Diana','5731-2026-73','conceede','7mo','01-09-2026','Kevin'],['Diana','5949-2026','Admite','1ero','02-09-2026','kenia'],
+        ['Diana','3154-2026','Admite','7mo','02-09-2026','Yeraldo'],['Glenda','5614-2026','improcedente','1ro','07-09-2026','Kevin']
+      ];
+      var hoy = new Date(); hoy = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+      function fmt(d) { return ('0' + d.getDate()).slice(-2) + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + d.getFullYear(); }
+      function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase(); }
+      var vistos = {};
+      var regs = filas.map(function (f, i) {
+        var p = f[4].split('-'), asig = new Date(+p[2], p[1] - 1, +p[0]);
+        var lim = new Date(asig); lim.setDate(lim.getDate() + 5);
+        var dias = Math.round((lim - hoy) / 86400000);
+        var s = f[2].toLowerCase();
+        var sentido = s.indexOf('admit') === 0 ? 'Admite' : s.indexOf('conc') === 0 ? 'Concede' : cap(s);
+        var est = dias < 0 ? { codigo: 'vencido', etiqueta: 'Plazo Vencido' } : dias === 0 ? { codigo: 'hoy', etiqueta: 'Vence hoy' }
+          : dias <= 2 ? { codigo: 'proximo', etiqueta: 'Por vencer' } : { codigo: 'plazo', etiqueta: 'En plazo' };
+        vistos[f[1] + sentido] = (vistos[f[1] + sentido] || 0) + 1;
+        return { fila: i + 2, expediente: f[1], secretarioInicial: f[0], sentido: sentido, dependencia: parseInt(f[3], 10) + '° Juzgado',
+          tramitador: cap(f[5]), fechaAsignacion: f[4], fechaLimite: fmt(lim), diasRestantes: dias, estado: est };
+      });
+      regs.forEach(function (r) { r.duplicado = vistos[r.expediente + r.sentido] > 1; });
+      return { hoy: fmt(hoy), plazoDias: 5, registros: regs };
+    }
+
+    cargar();
+  </script>
+</body>
+</html>
