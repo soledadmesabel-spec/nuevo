@@ -1,0 +1,13 @@
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+  .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+  .toast-item { animation: toast-in 0.2s ease-out; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  [data-lucide] { display: inline-block; }
+  .badge-dot { width: 6px; height: 6px; border-radius: 999px; }
+  @media print {
+    header, footer, .no-print { display: none !important; }
+  }
+</style>

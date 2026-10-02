@@ -1,0 +1,1163 @@
+<script>
+/* ============================================================
+   MESA DE PEDIDOS JUDICIALES — cliente (vanilla JS)
+   Equivalente funcional del App.tsx original (React).
+   ============================================================ */
+
+// ---------- Wrapper de google.script.run como Promesa ----------
+function gs(fnName, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(err => reject(err))
+      [fnName](...args);
+  });
+}
+
+// ---------- Utilidades de formato WhatsApp (réplica de whatsappFormatter.ts) ----------
+function formatToWhatsAppMessage(pedido, options) {
+  options = options || {};
+  const formatStyle = options.formatStyle || 'clasico';
+  const includeSolicitante = !!options.includeSolicitante;
+
+  const saludo = (pedido.saludo || '').trim() || 'Buen día dra. Yuly';
+  const tipoTramite = (pedido.tipoTramite || '').trim();
+  const expediente = (pedido.expediente || '').trim();
+  const juzgado = (pedido.juzgado || '').trim();
+  const materia = (pedido.materia || '').trim();
+  const especialista = (pedido.especialista || '').trim();
+  const requerimiento = (pedido.requerimiento || '').trim();
+  const solicitante = (pedido.solicitante || '').trim();
+  const telefono = (pedido.telefono || '').trim();
+  const colegiatura = (pedido.colegiaturaOCasilla || '').trim();
+
+  if (formatStyle === 'clasico') {
+    let msg = saludo + '\n';
+    if (tipoTramite) msg += 'TIPO DE TRÁMITE: ' + tipoTramite + '\n';
+    msg += 'EXPEDIENTE     : ' + expediente + '\n';
+    msg += 'JUZGADO        : ' + juzgado + '\n';
+    msg += 'MATERIA        : ' + materia + '\n';
+    msg += 'ESPECIALISTA   : ' + especialista + '\n';
+    msg += 'REQUERIMIENTO  : ' + requerimiento;
+    if (includeSolicitante && (solicitante || telefono || colegiatura)) {
+      msg += '\nSOLICITANTE    : ' + solicitante + (colegiatura ? ' (' + colegiatura + ')' : '') + (telefono ? ' - Cel: ' + telefono : '');
+    }
+    return msg;
+  }
+
+  if (formatStyle === 'estructurado_emoji') {
+    let msg = saludo + '\n\n';
+    msg += '⚖️ *REGISTRO DE PEDIDO JUDICIAL*\n';
+    msg += '─────────────────────────\n';
+    if (tipoTramite) msg += '📋 *TIPO DE TRÁMITE :* ' + tipoTramite + '\n';
+    msg += '📁 *EXPEDIENTE      :* ' + expediente + '\n';
+    msg += '🏛️ *JUZGADO         :* ' + juzgado + '\n';
+    msg += '📜 *MATERIA         :* ' + materia + '\n';
+    msg += '👤 *ESPECIALISTA    :* ' + especialista + '\n';
+    msg += '─────────────────────────\n';
+    msg += '📝 *REQUERIMIENTO   :*\n' + requerimiento + '\n';
+    if (includeSolicitante && (solicitante || telefono || colegiatura)) {
+      msg += '─────────────────────────\n';
+      msg += '🧑‍💼 *SOLICITANTE:* ' + (solicitante || 'Abogado patrocinante') + '\n';
+      if (colegiatura) msg += '🔖 *CASILLA/REG :* ' + colegiatura + '\n';
+      if (telefono) msg += '📱 *TELÉFONO    :* ' + telefono + '\n';
+    }
+    return msg.trim();
+  }
+
+  // compacto
+  let msg = '*' + saludo + '*\n';
+  if (tipoTramite) msg += '*Trámite:* ' + tipoTramite + ' | ';
+  msg += '*Exp:* ' + expediente + ' | *Juzgado:* ' + juzgado + ' | *Materia:* ' + materia + ' | *Esp:* ' + especialista + '\n';
+  msg += '*Requerimiento:* ' + requerimiento;
+  if (includeSolicitante && solicitante) msg += '\n*Por:* ' + solicitante + ' (' + telefono + ')';
+  return msg;
+}
+
+function generateWhatsAppLink(message, phoneNumber) {
+  const cleanPhone = phoneNumber ? phoneNumber.replace(/[^0-9]/g, '') : '';
+  const encoded = encodeURIComponent(message);
+  if (cleanPhone && cleanPhone.length >= 8) return 'https://wa.me/' + cleanPhone + '?text=' + encoded;
+  return 'https://api.whatsapp.com/send?text=' + encoded;
+}
+
+function parseRawWhatsAppMessage(rawText) {
+  const result = {};
+  if (!rawText) return result;
+  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+
+  if (lines.length > 0 && /^(buen|buena|hola|estimad|dra\.|dr\.)/i.test(lines[0])) {
+    result.saludo = lines[0];
+  }
+
+  const patterns = [
+    ['tipoTramite', /(?:tipo\s*de\s*tr[aá]mite|tramite)\s*[:=]\s*(.+)/i],
+    ['expediente', /(?:expediente|exp\.?)\s*[:=]\s*([0-9a-zA-Z\-_/]+)/i],
+    ['juzgado', /(?:juzgado|organo\s*jurisdiccional)\s*[:=]\s*(.+)/i],
+    ['materia', /(?:materia)\s*[:=]\s*(.+)/i],
+    ['especialista', /(?:especialista|secretario|asistente)\s*[:=]\s*(.+)/i],
+    ['solicitante', /(?:solicitante|abogado|letrado|por)\s*[:=]\s*(.+)/i],
+    ['telefono', /(?:tel[eé]fono|celular|cel|whatsapp|ws)\s*[:=]\s*([+0-9\s\-]+)/i]
+  ];
+  patterns.forEach(([key, regex]) => {
+    const m = rawText.match(regex);
+    if (m && m[1]) result[key] = m[1].trim();
+  });
+
+  const reqMatch = rawText.match(/(?:requerimiento|solicitud|motivo|pedido|detalle)\s*[:=]\s*([\s\S]+?)(?=(?:SOLICITANTE|TEL|CASILLA|────────|━━━━━━━━|$))/i);
+  if (reqMatch && reqMatch[1]) result.requerimiento = reqMatch[1].trim();
+
+  if (!result.expediente) {
+    const expDirect = rawText.match(/(\d{4,5}-\d{4}-\d+-\d{4}-[A-Z]{2}-[A-Z]{2}-\d{1,2})/);
+    if (expDirect) result.expediente = expDirect[1];
+  }
+  return result;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function nl2br(s) { return esc(s).replace(/\n/g, '<br>'); }
+
+const ESTADO_COLORS = {
+  'Pendiente': 'bg-slate-200 text-slate-700 border-slate-300',
+  'En Trámite': 'bg-amber-100 text-amber-800 border-amber-300',
+  'Atendido': 'bg-emerald-100 text-emerald-800 border-emerald-300',
+  'Observado': 'bg-red-100 text-red-800 border-red-300'
+};
+const PRIORIDAD_COLORS = {
+  'Normal': 'bg-slate-100 text-slate-600',
+  'Urgente': 'bg-amber-100 text-amber-700',
+  'Muy Urgente': 'bg-red-100 text-red-700'
+};
+
+// ============================================================
+// ESTADO GLOBAL
+// ============================================================
+const S = {
+  pedidos: [],
+  juzgados: [],
+  config: { tiposTramite: [], materiasFrecuentes: [], juzgados: [] },
+  webAppUrl: '',
+  currentPedido: null,
+  viewMode: 'public',
+  activeTab: 'nuevo',
+  ui: {
+    customEspecialista: false,
+    showSolicitante: false,
+    templateCategory: 'demora',
+    previewFormat: 'clasico',
+    previewIncludeSolicitante: false,
+    seguimientoSearch: '',
+    directorioSearch: '',
+    directorioEspecialidad: 'todos',
+    bandejaSearch: '',
+    bandejaEstado: 'todos',
+    bandejaTipo: 'todos',
+    bandejaJuzgado: 'todos',
+    editingNoteId: null,
+    tempNoteText: ''
+  }
+};
+
+function nuevoPedidoVacio() {
+  return {
+    id: 'ped-' + Date.now(),
+    fechaCreacion: new Date().toISOString(),
+    saludo: S.config.destinatarioDefault || 'Buen dia dra. Yuly',
+    tipoTramite: (S.config.tiposTramite[0] && S.config.tiposTramite[0].titulo) || 'Proveido Escrito ( Indicar si es reterativo)',
+    expediente: '',
+    juzgado: (S.juzgados[0] && S.juzgados[0].nombre) || '',
+    materia: '',
+    especialista: (S.juzgados[0] && S.juzgados[0].especialistas[0]) || '',
+    requerimiento: '',
+    solicitante: '', telefono: '', colegiaturaOCasilla: '',
+    prioridad: 'Normal', estado: 'Pendiente'
+  };
+}
+
+function pedidoEjemplo() {
+  return {
+    id: 'ped-' + Date.now(),
+    fechaCreacion: new Date().toISOString(),
+    saludo: S.config.destinatarioDefault || 'Buen dia dra. Yuly',
+    tipoTramite: 'Proveido Escrito ( Indicar si es reterativo)',
+    expediente: '02098-2015-8-0401-JR-CI-10',
+    juzgado: '10mo Juzgado Civil',
+    materia: 'Reivindicación',
+    especialista: 'Francis Zegarra Cardenas',
+    requerimiento: 'Desde el 07 de julio del año en curso se encuentra pendiente de resolver escritos para poder impulsar el proceso. El expediente se tramita con la nueva especialista Dra. Francis Zegarra Cardenas. Pese a que existe un proceso disciplinario, la demora sigue perjudicando.',
+    solicitante: 'Abg. Carlos Mendoza', telefono: '954123987', colegiaturaOCasilla: 'CAA-4921',
+    prioridad: 'Urgente', estado: 'Pendiente'
+  };
+}
+
+// ============================================================
+// ARRANQUE
+// ============================================================
+window.addEventListener('DOMContentLoaded', () => {
+  lucide.createIcons();
+  // Apps Script sirve la página dentro de un iframe: los query params llegan por doGet, no por location.
+  const params = new URLSearchParams('view=' + (window.__VIEW__ || ''));
+  const isAuth = sessionStorage.getItem('admin_auth_token');
+  if (params.get('view') === 'admin' && isAuth) {
+    S.viewMode = 'admin';
+    S.activeTab = 'bandeja';
+  }
+
+  gs('obtenerDatosIniciales').then(data => {
+    S.pedidos = data.pedidos || [];
+    S.config = data.config || {};
+    S.juzgados = data.juzgados || [];
+    S.webAppUrl = data.webAppUrl || '';
+    S.currentPedido = nuevoPedidoVacio();
+
+    if (params.get('view') === 'admin' && !isAuth) {
+      App.openLoginModal();
+    }
+
+    App.renderAll();
+  }).catch(err => {
+    document.getElementById('app-main').innerHTML =
+      '<div class="p-6 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">Error cargando datos: ' + esc(err.message || err) + '<br>Verifica que ejecutaste "Inicializar / Reparar hojas" desde el menú de la hoja de cálculo.</div>';
+  });
+});
+
+// ============================================================
+// APP — controlador principal
+// ============================================================
+const App = {
+
+  toast(msg) {
+    const el = document.createElement('div');
+    el.className = 'toast-item bg-slate-900 text-white border border-emerald-500 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-medium flex items-center gap-2';
+    el.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400"></span><span>' + esc(msg) + '</span>';
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  },
+
+  renderAll() {
+    this.renderHeader();
+    this.renderMain();
+    lucide.createIcons();
+  },
+
+  setTab(tab) { S.activeTab = tab; this.renderAll(); },
+
+  // ---------------- HEADER ----------------
+  renderHeader() {
+    const totalPedidos = S.pedidos.length;
+    const pendientes = S.pedidos.filter(p => p.estado === 'Pendiente').length;
+    const tab = (id, icon, label, extra) => `
+      <button onclick="App.setTab('${id}')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${S.activeTab === id ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-700/60'}">
+        <i data-lucide="${icon}" class="w-3.5 h-3.5"></i><span>${label}</span>${extra || ''}
+      </button>`;
+
+    let tabs = tab('nuevo', 'message-square', 'Registrar Pedido');
+    if (S.viewMode === 'public') tabs += tab('seguimiento', 'search', 'Consultar Estado');
+    if (S.viewMode === 'admin') tabs += tab('bandeja', 'list-ordered', 'Bandeja Admin (' + totalPedidos + ')', pendientes > 0 ? '<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>' : '');
+    tabs += tab('directorio', 'building-2', 'Juzgados');
+    if (S.viewMode === 'admin') tabs += tab('configuracion', 'settings', 'Configuración');
+
+    document.getElementById('app-header').innerHTML = `
+      <header class="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30 shadow-md">
+        <div class="bg-slate-950 px-4 py-1 border-b border-slate-800/80 text-[11px] flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            ${S.viewMode === 'admin'
+              ? '<span class="inline-flex items-center gap-1 text-amber-300 font-bold bg-amber-950/80 border border-amber-800/80 px-2 py-0.5 rounded-md"><i data-lucide="shield-check" class="w-3 h-3"></i><span>Panel de Administrador Activo</span></span>'
+              : '<span class="inline-flex items-center gap-1 text-emerald-300 font-medium bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded-md"><span class="badge-dot bg-emerald-400"></span><span>Vista Pública (Grupo WhatsApp)</span></span>'}
+          </div>
+          <div class="flex items-center gap-3">
+            ${S.viewMode === 'admin'
+              ? '<button onclick="App.adminLogout()" class="text-amber-300 hover:text-amber-200 font-semibold flex items-center gap-1"><i data-lucide="log-out" class="w-3 h-3"></i><span>Cerrar Sesión Admin</span></button>'
+              : '<button onclick="App.openLoginModal()" class="text-slate-300 hover:text-white flex items-center gap-1 font-semibold"><i data-lucide="lock" class="w-3 h-3 text-amber-400"></i><span>Acceso Administrador</span></button>'}
+          </div>
+        </div>
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div class="flex flex-col md:flex-row md:items-center md:justify-between py-3 gap-3">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-inner">
+                <i data-lucide="scale" class="w-5 h-5 text-white"></i>
+              </div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <h1 class="text-lg font-bold text-slate-100 tracking-tight">Mesa de Pedidos Judiciales</h1>
+                  <span class="inline-flex items-center gap-1 text-[11px] font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 px-2 py-0.5 rounded-full">WhatsApp 500</span>
+                </div>
+                <p class="text-xs text-slate-400 truncate max-w-sm">${esc(S.config.nombreGrupo || 'Generador y Registro de Requerimientos Procesales')}</p>
+              </div>
+            </div>
+            <div class="flex items-center justify-between md:justify-end gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
+              <nav class="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700/80 shadow-inner">${tabs}</nav>
+              <div class="hidden md:flex items-center gap-2 pl-2">
+                <button onclick="App.openImportModal()" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5 text-emerald-400"></i><span>Pegar Texto</span></button>
+                <button onclick="App.openShareModal()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"><i data-lucide="share-2" class="w-3.5 h-3.5"></i><span>Link Permanente</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>`;
+  },
+
+  // ---------------- MAIN ROUTER ----------------
+  renderMain() {
+    const main = document.getElementById('app-main');
+    if (S.activeTab === 'nuevo') main.innerHTML = this.tplFormulario() + this.tplPreview();
+    else if (S.activeTab === 'seguimiento') main.innerHTML = this.tplSeguimiento();
+    else if (S.activeTab === 'bandeja' && S.viewMode === 'admin') main.innerHTML = this.tplBandeja();
+    else if (S.activeTab === 'directorio') main.innerHTML = this.tplDirectorio();
+    else if (S.activeTab === 'configuracion' && S.viewMode === 'admin') main.innerHTML = this.tplConfiguracion();
+    else main.innerHTML = this.tplFormulario() + this.tplPreview();
+
+    if (S.activeTab === 'nuevo') {
+      main.className = 'flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start';
+    } else {
+      main.className = 'flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8';
+    }
+  },
+
+  // ============================================================
+  // TAB: NUEVO PEDIDO — FORMULARIO
+  // ============================================================
+  onFieldInput(field, value) {
+    S.currentPedido[field] = value;
+    this.updatePreviewText();
+  },
+
+  onJuzgadoChange(nombre) {
+    const found = S.juzgados.find(j => j.nombre === nombre);
+    S.currentPedido.juzgado = nombre;
+    if (found && found.especialistas.length > 0 && !found.especialistas.includes(S.currentPedido.especialista)) {
+      S.currentPedido.especialista = found.especialistas[0] || '';
+    }
+    S.ui.customEspecialista = false;
+    this.renderMain();
+  },
+
+  toggleCustomEspecialista() {
+    S.ui.customEspecialista = !S.ui.customEspecialista;
+    this.renderMain();
+  },
+
+  toggleSolicitante() { S.ui.showSolicitante = !S.ui.showSolicitante; this.renderMain(); },
+
+  setTemplateCategory(cat) { S.ui.templateCategory = cat; this.renderMain(); },
+
+  applyTemplate(text) {
+    S.currentPedido.requerimiento = text;
+    this.renderMain();
+  },
+
+  templates() {
+    const esp = S.currentPedido.especialista || '[Especialista]';
+    return {
+      demora: [
+        'Desde el [fecha] se encuentra pendiente de resolver escritos para poder impulsar el proceso, a cargo de la especialista ' + esp + '. Se solicita respetuosamente el impulso correspondiente.',
+        'El escrito de fecha [fecha] se encuentra sin proveer hasta la actualidad, lo que viene perjudicando el impulso procesal del expediente.'
+      ],
+      sentencia: [
+        'El proceso se encuentra al despacho para sentenciar, habiendo vencido en exceso el plazo legal para su emisión. Se solicita su pronta expedición.',
+        'Se encuentra pendiente de resolver el auto final / sentencia de vista, pese a haberse realizado el informe oral correspondiente.'
+      ],
+      notificacion: [
+        'Se solicita impulsar el diligenciamiento de la cédula de notificación de la resolución respectiva, no habiéndose adjuntado el cargo hasta la fecha.',
+        'Se requiere la notificación electrónica / física pendiente para continuar con el trámite del expediente.'
+      ],
+      general: [
+        'Se solicita información sobre el estado actual del expediente y las acciones pendientes de calificación.',
+        'Se pone en conocimiento la presente incidencia para la atención correspondiente del despacho.'
+      ]
+    };
+  },
+
+  handleResetForm() {
+    S.currentPedido = nuevoPedidoVacio();
+    S.ui.showSolicitante = false;
+    this.toast('Formulario limpiado para un nuevo registro.');
+    this.renderMain();
+  },
+
+  handleFillExample() {
+    S.currentPedido = pedidoEjemplo();
+    S.ui.showSolicitante = true;
+    this.toast('Ejemplo típico cargado en el formulario.');
+    this.renderMain();
+  },
+
+  updatePreviewText() {
+    const el = document.getElementById('whatsapp-preview-text');
+    if (el) el.textContent = formatToWhatsAppMessage(S.currentPedido, { formatStyle: S.ui.previewFormat, includeSolicitante: S.ui.previewIncludeSolicitante });
+  },
+
+  async savePedido(notify) {
+    if (notify === undefined) notify = true;
+    try {
+      const saved = await gs('guardarPedido', S.currentPedido);
+      const idx = S.pedidos.findIndex(p => p.id === saved.id);
+      if (idx >= 0) S.pedidos[idx] = saved; else S.pedidos.unshift(saved);
+      if (notify) this.toast('Solicitud registrada exitosamente en la base de datos.');
+    } catch (e) {
+      this.toast('Error al guardar: ' + (e.message || e));
+    }
+  },
+
+  async copyFormatted() {
+    const text = formatToWhatsAppMessage(S.currentPedido, { formatStyle: S.ui.previewFormat, includeSolicitante: S.ui.previewIncludeSolicitante });
+    this.copyToClipboard(text);
+    await this.savePedido(false);
+    this.toast('¡Texto copiado y pedido registrado! Listo para pegar en WhatsApp.');
+  },
+
+  async sendDirectWhatsApp() {
+    const text = formatToWhatsAppMessage(S.currentPedido, { formatStyle: S.ui.previewFormat, includeSolicitante: S.ui.previewIncludeSolicitante });
+    const url = generateWhatsAppLink(text, S.config.telefonoCoordinador);
+    await this.savePedido(false);
+    window.open(url, '_blank');
+  },
+
+  copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+    }
+  },
+
+  tplFormulario() {
+    const p = S.currentPedido;
+    const juzgadoActual = S.juzgados.find(j => j.nombre === p.juzgado);
+    const especialistas = juzgadoActual ? juzgadoActual.especialistas : [];
+    const tmpl = this.templates();
+
+    return `
+    <div class="lg:col-span-7">
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 overflow-hidden">
+      <div class="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-4 sm:p-6 text-white border-b border-slate-700/80">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-semibold flex items-center gap-1.5"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i>Formulario Estructurado Oficial</span>
+              <span class="text-xs text-slate-400">Grupo de 500 Miembros</span>
+            </div>
+            <h2 class="text-xl sm:text-2xl font-bold text-white tracking-tight">Registro de Solicitud Procesal</h2>
+            <p class="text-sm text-slate-300 mt-1 max-w-xl">Complete los campos para generar el texto estandarizado listo para enviar o copiar al grupo de WhatsApp.</p>
+            <div class="mt-3 p-3 bg-red-950/90 border border-red-500/70 rounded-xl text-red-100 text-xs sm:text-sm flex items-start gap-2.5 max-w-2xl">
+              <i data-lucide="shield-alert" class="w-4 h-4 sm:w-5 sm:h-5 text-red-400 shrink-0 mt-0.5"></i>
+              <div class="leading-relaxed"><span class="font-bold text-red-300">AVISO IMPORTANTE: </span><span class="text-red-200">Los pedidos de Medidas Cautelares Reservados no serán atendidos. </span><span class="font-semibold text-white">Únicamente se atenderán los pedidos de Medidas Cautelares Públicas.</span></div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 self-start sm:self-auto">
+            <button type="button" onclick="App.handleFillExample()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-600 flex items-center gap-1.5"><i data-lucide="bookmark" class="w-3.5 h-3.5 text-amber-400"></i><span>Ejemplo Típico</span></button>
+            <button type="button" onclick="App.handleResetForm()" class="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 rounded-xl border border-slate-600" title="Limpiar formulario"><i data-lucide="rotate-ccw" class="w-4 h-4"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-4 sm:p-6 space-y-6">
+        <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200/90">
+          <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Saludo / Destinatario en el Grupo</label>
+          <input type="text" value="${esc(p.saludo)}" oninput="App.onFieldInput('saludo', this.value)" placeholder="Buen dia dra. Yuly" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Tipo de Trámite</label>
+          <select onchange="App.onFieldInput('tipoTramite', this.value)" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+            ${(S.config.tiposTramite || []).map(t => `<option value="${esc(t.titulo)}" ${p.tipoTramite === t.titulo ? 'selected' : ''}>${esc(t.titulo)}</option>`).join('')}
+          </select>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Expediente</label>
+            <input type="text" value="${esc(p.expediente)}" oninput="App.onFieldInput('expediente', this.value)" placeholder="02098-2015-8-0401-JR-CI-10" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none font-mono">
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Materia</label>
+            <input list="materias-list" type="text" value="${esc(p.materia)}" oninput="App.onFieldInput('materia', this.value)" placeholder="Reivindicación" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+            <datalist id="materias-list">${(S.config.materiasFrecuentes || []).map(m => `<option value="${esc(m)}">`).join('')}</datalist>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Juzgado</label>
+            <select onchange="App.onJuzgadoChange(this.value)" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+              <option value="">-- Seleccionar --</option>
+              ${S.juzgados.map(j => `<option value="${esc(j.nombre)}" ${p.juzgado === j.nombre ? 'selected' : ''}>${esc(j.nombre)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5 flex items-center justify-between">
+              <span>Especialista</span>
+              <button type="button" onclick="App.toggleCustomEspecialista()" class="text-[11px] font-semibold text-emerald-700 hover:underline">${S.ui.customEspecialista ? 'Elegir de la lista' : 'Escribir otro'}</button>
+            </label>
+            ${S.ui.customEspecialista || especialistas.length === 0
+              ? `<input type="text" value="${esc(p.especialista)}" oninput="App.onFieldInput('especialista', this.value)" placeholder="Nombre del especialista" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">`
+              : `<select onchange="App.onFieldInput('especialista', this.value)" class="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+                  ${especialistas.map(e => `<option value="${esc(e)}" ${p.especialista === e ? 'selected' : ''}>${esc(e)}</option>`).join('')}
+                </select>`}
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">Prioridad</label>
+          <div class="flex gap-2">
+            ${['Normal', 'Urgente', 'Muy Urgente'].map(pr => `
+              <button type="button" onclick="App.onFieldInput('prioridad', '${pr}'); App.renderMain();" class="flex-1 px-3 py-2 rounded-lg text-xs font-bold border ${p.prioridad === pr ? (pr === 'Muy Urgente' ? 'bg-red-600 text-white border-red-600' : pr === 'Urgente' ? 'bg-amber-500 text-white border-amber-500' : 'bg-slate-700 text-white border-slate-700') : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${pr}</button>
+            `).join('')}
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5"><i data-lucide="alert-circle" class="w-4 h-4 text-amber-600"></i><span>REQUERIMIENTO / MOTIVO DE LA SOLICITUD</span></label>
+            <div class="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-[11px]">
+              ${['demora', 'sentencia', 'notificacion', 'general'].map(cat => `<button type="button" onclick="App.setTemplateCategory('${cat}')" class="px-2 py-0.5 rounded font-medium ${S.ui.templateCategory === cat ? 'bg-white shadow-xs text-slate-900 font-bold' : 'text-slate-600 hover:text-slate-900'}">${cat === 'demora' ? 'Demora / Escritos' : cat === 'sentencia' ? 'Sentencia' : cat === 'notificacion' ? 'Cédulas' : 'General'}</button>`).join('')}
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            ${tmpl[S.ui.templateCategory].map(t => `<button type="button" onclick="App.applyTemplate(${JSON.stringify(t).replace(/"/g, '&quot;')})" class="w-full text-left p-2 rounded-lg text-xs bg-slate-50 hover:bg-emerald-50/70 border border-slate-200/80 hover:border-emerald-300 text-slate-700 flex items-start gap-2"><i data-lucide="sparkles" class="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0"></i><span class="line-clamp-2">${esc(t)}</span></button>`).join('')}
+          </div>
+          <textarea rows="4" oninput="App.onFieldInput('requerimiento', this.value)" placeholder="Describa el requerimiento, escrito pendiente de resolver, fecha del escrito, demora advertida o motivo..." class="w-full p-3.5 text-sm bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none leading-relaxed">${esc(p.requerimiento)}</textarea>
+          <div class="flex items-center justify-between text-[11px] text-slate-400 px-1"><span>Caracteres: ${p.requerimiento.length}</span><span>Se recomienda detallar fechas o estado del escrito</span></div>
+        </div>
+
+        <div class="bg-slate-50/80 rounded-xl border border-slate-200/80 overflow-hidden">
+          <button type="button" onclick="App.toggleSolicitante()" class="w-full px-3.5 py-2.5 flex items-center justify-between hover:bg-slate-100/70 text-left">
+            <span class="text-xs font-semibold text-slate-600 flex items-center gap-2"><i data-lucide="user" class="w-3.5 h-3.5"></i><span>Datos del Abogado / Solicitante</span><span class="text-[10px] font-medium text-slate-500 bg-slate-200/70 px-2 py-0.5 rounded-full">${S.ui.showSolicitante ? 'Visible' : 'Oculto'}</span></span>
+            <i data-lucide="${S.ui.showSolicitante ? 'eye-off' : 'eye'}" class="w-3.5 h-3.5 text-slate-500"></i>
+          </button>
+          ${S.ui.showSolicitante ? `
+          <div class="p-3.5 pt-1 border-t border-slate-200/70 space-y-3 bg-white/60">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div><label class="block text-[11px] font-semibold text-slate-600 mb-1">Nombre / Letrado</label><input type="text" value="${esc(p.solicitante)}" oninput="App.onFieldInput('solicitante', this.value)" placeholder="Dr. Marco Aurelio Vargas" class="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:ring-1 focus:ring-emerald-500 outline-none"></div>
+              <div><label class="block text-[11px] font-semibold text-slate-600 mb-1">WhatsApp / Celular</label><input type="text" value="${esc(p.telefono)}" oninput="App.onFieldInput('telefono', this.value)" placeholder="+51 958 123 456" class="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:ring-1 focus:ring-emerald-500 outline-none"></div>
+              <div><label class="block text-[11px] font-semibold text-slate-600 mb-1">Colegiatura / Casilla SINOE</label><input type="text" value="${esc(p.colegiaturaOCasilla)}" oninput="App.onFieldInput('colegiaturaOCasilla', this.value)" placeholder="CAA 45892 / Casilla 11420" class="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:ring-1 focus:ring-emerald-500 outline-none"></div>
+            </div>
+          </div>` : ''}
+        </div>
+
+        <div class="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          <button type="button" onclick="App.copyFormatted()" class="flex-1 py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm shadow-md flex items-center justify-center gap-2"><i data-lucide="copy" class="w-4 h-4 text-emerald-400"></i><span>Copiar para WhatsApp</span></button>
+          <button type="button" onclick="App.sendDirectWhatsApp()" class="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-md flex items-center justify-center gap-2"><i data-lucide="send" class="w-4 h-4"></i><span>Enviar Directo a WhatsApp</span></button>
+          <button type="button" onclick="App.savePedido(true)" class="py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-sm border border-slate-300 flex items-center justify-center gap-2"><i data-lucide="bookmark" class="w-4 h-4"></i><span>Guardar Registro</span></button>
+        </div>
+      </div>
+    </div>
+    </div>`;
+  },
+
+  // ============================================================
+  // PANEL DE VISTA PREVIA WHATSAPP
+  // ============================================================
+  setPreviewFormat(fmt) { S.ui.previewFormat = fmt; this.renderMain(); },
+  toggleIncludeSolicitante() { S.ui.previewIncludeSolicitante = !S.ui.previewIncludeSolicitante; this.renderMain(); },
+
+  tplPreview() {
+    const text = formatToWhatsAppMessage(S.currentPedido, { formatStyle: S.ui.previewFormat, includeSolicitante: S.ui.previewIncludeSolicitante });
+    const waLink = generateWhatsAppLink(text, S.config.telefonoCoordinador);
+    return `
+    <div class="lg:col-span-5 lg:sticky lg:top-20">
+      <div class="bg-slate-900 rounded-2xl shadow-lg border border-slate-800 overflow-hidden">
+        <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-100 flex items-center gap-1.5"><i data-lucide="message-square" class="w-4 h-4 text-emerald-400"></i>Vista Previa WhatsApp</h3>
+          <div class="flex items-center gap-1 bg-slate-800 p-0.5 rounded-lg text-[11px]">
+            <button onclick="App.setPreviewFormat('clasico')" title="Formato idéntico al solicitado" class="px-2 py-1 rounded ${S.ui.previewFormat === 'clasico' ? 'bg-emerald-600 text-white' : 'text-slate-300'}">Clásico</button>
+            <button onclick="App.setPreviewFormat('estructurado_emoji')" title="Formato con iconos y negritas" class="px-2 py-1 rounded ${S.ui.previewFormat === 'estructurado_emoji' ? 'bg-emerald-600 text-white' : 'text-slate-300'}">Emoji</button>
+            <button onclick="App.setPreviewFormat('compacto')" class="px-2 py-1 rounded ${S.ui.previewFormat === 'compacto' ? 'bg-emerald-600 text-white' : 'text-slate-300'}">Compacto</button>
+          </div>
+        </div>
+        <div class="p-4">
+          <div id="whatsapp-preview-text" class="bg-[#0b141a] text-[#e9edef] text-xs sm:text-sm rounded-xl p-3.5 whitespace-pre-wrap font-mono min-h-[160px] leading-relaxed">${esc(text)}</div>
+          <label class="flex items-center gap-2 cursor-pointer select-none mt-3 text-xs text-slate-300">
+            <input type="checkbox" ${S.ui.previewIncludeSolicitante ? 'checked' : ''} onchange="App.toggleIncludeSolicitante()">
+            Incluir datos del solicitante en el texto
+          </label>
+          <div class="grid grid-cols-2 gap-2 mt-3">
+            <button onclick="App.copyFormatted()" class="py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center justify-center gap-1.5"><i data-lucide="copy" class="w-3.5 h-3.5"></i>Copiar</button>
+            <a href="${waLink}" target="_blank" onclick="App.savePedido(false)" class="py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>Abrir WhatsApp</a>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  },
+
+  // ============================================================
+  // TAB: SEGUIMIENTO PÚBLICO
+  // ============================================================
+  setSeguimientoSearch(v) { S.ui.seguimientoSearch = v; this.renderMain(); },
+
+  selectForEdit(id) {
+    const p = S.pedidos.find(x => x.id === id);
+    if (!p) return;
+    S.currentPedido = Object.assign({}, p);
+    S.activeTab = 'nuevo';
+    this.toast('Solicitud ' + p.expediente + ' cargada en el formulario.');
+    this.renderAll();
+  },
+
+  tplSeguimiento() {
+    const q = S.ui.seguimientoSearch.toLowerCase();
+    const list = S.pedidos.filter(p =>
+      !q || (p.expediente || '').toLowerCase().includes(q) || (p.juzgado || '').toLowerCase().includes(q) || (p.especialista || '').toLowerCase().includes(q)
+    );
+    return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-5">
+        <h2 class="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight mb-3">Consultar Estado de mi Pedido</h2>
+        <input type="text" value="${esc(S.ui.seguimientoSearch)}" oninput="App.setSeguimientoSearch(this.value)" placeholder="Ingrese N° de Expediente (ej: 02098-2015...), Juzgado o Especialista..." class="w-full px-4 py-3 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none">
+      </div>
+      <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider px-1">${list.length} resultado(s)</h3>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        ${list.map(p => this.tplPedidoCard(p, false)).join('') || '<div class="col-span-2 text-center text-sm text-slate-500 py-10">No se encontraron pedidos.</div>'}
+      </div>
+    </div>`;
+  },
+
+  tplPedidoCard(p, adminMode) {
+    const estadoClass = ESTADO_COLORS[p.estado] || ESTADO_COLORS['Pendiente'];
+    const prioClass = PRIORIDAD_COLORS[p.prioridad] || PRIORIDAD_COLORS['Normal'];
+    return `
+    <div class="bg-white rounded-xl border border-slate-200/80 p-4 hover:shadow-md transition-shadow cursor-pointer" onclick="App.selectForEdit('${p.id}')">
+      <div class="flex items-start justify-between gap-2 mb-2">
+        <span class="font-mono text-xs font-bold text-slate-800">${esc(p.expediente)}</span>
+        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${estadoClass}">${esc(p.estado)}</span>
+      </div>
+      <div class="text-xs text-slate-600 space-y-0.5">
+        <div><span class="font-semibold text-slate-700">Juzgado:</span> ${esc(p.juzgado)}</div>
+        <div><span class="font-semibold text-slate-700">Materia:</span> ${esc(p.materia)}</div>
+        <div><span class="font-semibold text-slate-700">Especialista:</span> ${esc(p.especialista)}</div>
+      </div>
+      <div class="flex items-center justify-between mt-2 pt-2 border-t border-slate-100">
+        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${prioClass}">${esc(p.prioridad)}</span>
+        <span class="text-[10px] text-slate-400">${p.fechaCreacion ? new Date(p.fechaCreacion).toLocaleDateString() : ''}</span>
+      </div>
+      ${adminMode && p.observaciones ? `<div class="mt-2 text-[11px] text-slate-500 bg-slate-50 rounded-lg p-2">${esc(p.observaciones)}</div>` : ''}
+    </div>`;
+  },
+
+  // ============================================================
+  // TAB: BANDEJA ADMIN
+  // ============================================================
+  setBandejaSearch(v) { S.ui.bandejaSearch = v; this.renderMain(); },
+  setBandejaFiltro(campo, v) { S.ui['bandeja' + campo] = v; this.renderMain(); },
+
+  bandejaFiltrados() {
+    const q = S.ui.bandejaSearch.toLowerCase();
+    return S.pedidos.filter(p => {
+      if (S.ui.bandejaEstado !== 'todos' && p.estado !== S.ui.bandejaEstado) return false;
+      if (S.ui.bandejaTipo !== 'todos' && p.tipoTramite !== S.ui.bandejaTipo) return false;
+      if (S.ui.bandejaJuzgado !== 'todos' && p.juzgado !== S.ui.bandejaJuzgado) return false;
+      if (!q) return true;
+      return (p.expediente || '').toLowerCase().includes(q) || (p.especialista || '').toLowerCase().includes(q) ||
+             (p.juzgado || '').toLowerCase().includes(q) || (p.materia || '').toLowerCase().includes(q) ||
+             (p.solicitante || '').toLowerCase().includes(q);
+    });
+  },
+
+  async refreshPedidos() {
+    this.toast('Sincronizando...');
+    S.pedidos = await gs('obtenerPedidos');
+    this.renderAll();
+    this.toast('Pedidos sincronizados.');
+  },
+
+  startEditNote(id) {
+    const p = S.pedidos.find(x => x.id === id);
+    S.ui.editingNoteId = id;
+    S.ui.tempNoteText = (p && p.observaciones) || '';
+    this.renderMain();
+  },
+
+  async saveNote(id) {
+    const texto = S.ui.tempNoteText;
+    S.ui.editingNoteId = null;
+    await this.updateEstado(id, null, texto);
+  },
+
+  async updateEstado(id, nuevoEstado, notas) {
+    try {
+      const cambios = {};
+      if (nuevoEstado !== null && nuevoEstado !== undefined) cambios.estado = nuevoEstado;
+      if (notas !== undefined) cambios.observaciones = notas;
+      const updated = await gs('actualizarPedido', id, cambios);
+      const idx = S.pedidos.findIndex(p => p.id === id);
+      if (idx >= 0) S.pedidos[idx] = updated;
+      this.toast('Pedido actualizado' + (nuevoEstado ? ' a estado: ' + nuevoEstado : '.'));
+      this.renderMain();
+    } catch (e) {
+      this.toast('Error actualizando: ' + (e.message || e));
+    }
+  },
+
+  async deletePedido(id) {
+    if (!confirm('¿Está seguro de eliminar esta solicitud del registro?')) return;
+    try {
+      await gs('eliminarPedido', id);
+      S.pedidos = S.pedidos.filter(p => p.id !== id);
+      this.toast('Solicitud eliminada.');
+      this.renderMain();
+    } catch (e) {
+      this.toast('Error eliminando: ' + (e.message || e));
+    }
+  },
+
+  copyPedidoText(id) {
+    const p = S.pedidos.find(x => x.id === id);
+    if (!p) return;
+    this.copyToClipboard(formatToWhatsAppMessage(p, { formatStyle: 'clasico' }));
+    this.toast('Texto copiado.');
+  },
+
+  async exportCsv() {
+    try {
+      const csv = await gs('obtenerCsvPedidos');
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'pedidos_judiciales_' + new Date().toISOString().slice(0, 10) + '.csv';
+      a.click(); URL.revokeObjectURL(url);
+    } catch (e) { this.toast('Error exportando CSV: ' + (e.message || e)); }
+  },
+
+  exportJson() {
+    const blob = new Blob([JSON.stringify(S.pedidos, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'pedidos_judiciales_' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click(); URL.revokeObjectURL(url);
+  },
+
+  tplBandeja() {
+    const list = this.bandejaFiltrados();
+    const juzgadosUnicos = [...new Set(S.pedidos.map(p => p.juzgado))].filter(Boolean);
+    return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          <h2 class="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2"><i data-lucide="list-ordered" class="w-5 h-5 text-emerald-600"></i>Bandeja de Pedidos (${S.pedidos.length})</h2>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button onclick="App.refreshPedidos()" title="Sincronizar pedidos con el servidor" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>Sincronizar</button>
+            <button onclick="App.exportCsv()" title="Descargar pedidos filtrados en formato Excel / CSV" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1"><i data-lucide="sheet" class="w-3.5 h-3.5"></i>CSV</button>
+            <button onclick="App.exportJson()" title="Descargar copia de seguridad en JSON" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1"><i data-lucide="download" class="w-3.5 h-3.5"></i>JSON</button>
+            <button onclick="window.print()" title="Imprimir lista o guardar como PDF" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1"><i data-lucide="printer" class="w-3.5 h-3.5"></i>Imprimir</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 no-print">
+          <input type="text" value="${esc(S.ui.bandejaSearch)}" oninput="S.ui.bandejaSearch=this.value; App.renderMain();" placeholder="Buscar por expediente, especialista, juzgado, materia o abogado..." class="sm:col-span-2 px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none">
+          <select onchange="S.ui.bandejaEstado=this.value; App.renderMain();" class="px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg">
+            <option value="todos">Todos los estados</option>
+            ${['Pendiente', 'En Trámite', 'Atendido', 'Observado'].map(e => `<option value="${e}" ${S.ui.bandejaEstado === e ? 'selected' : ''}>${e}</option>`).join('')}
+          </select>
+          <select onchange="S.ui.bandejaJuzgado=this.value; App.renderMain();" class="px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg">
+            <option value="todos">Todos los juzgados</option>
+            ${juzgadosUnicos.map(j => `<option value="${esc(j)}" ${S.ui.bandejaJuzgado === j ? 'selected' : ''}>${esc(j)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      ${list.length === 0 ? '<div class="bg-white rounded-2xl border border-slate-200/80 p-10 text-center text-sm text-slate-500">No se encontraron pedidos con los filtros actuales.</div>' : `
+      <div class="space-y-3">
+        ${list.map(p => `
+        <div class="bg-white rounded-xl border border-slate-200/80 p-4">
+          <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <span class="font-mono text-xs font-bold text-slate-800">${esc(p.expediente)}</span>
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${PRIORIDAD_COLORS[p.prioridad] || ''}">${esc(p.prioridad)}</span>
+                <span class="text-[10px] text-slate-400">${p.fechaCreacion ? new Date(p.fechaCreacion).toLocaleString() : ''}</span>
+              </div>
+              <div class="text-xs text-slate-600 space-y-0.5">
+                <div><b>${esc(p.tipoTramite)}</b> — ${esc(p.juzgado)} — ${esc(p.materia)}</div>
+                <div>Especialista: ${esc(p.especialista)} ${p.solicitante ? '· Solicitante: ' + esc(p.solicitante) : ''}</div>
+                <div class="text-slate-500">${esc(p.requerimiento)}</div>
+              </div>
+              ${S.ui.editingNoteId === p.id
+                ? `<div class="mt-2 flex flex-col gap-1.5">
+                    <textarea rows="2" oninput="S.ui.tempNoteText=this.value" placeholder="Escriba la respuesta o estado interno (ej: Se conversó con especialista, proveído saldrá el 28/08)..." class="w-full text-xs p-2 border border-slate-300 rounded-lg">${esc(S.ui.tempNoteText)}</textarea>
+                    <div class="flex gap-2"><button onclick="App.saveNote('${p.id}')" class="text-[11px] font-bold text-white bg-emerald-600 px-2 py-1 rounded">Guardar nota</button><button onclick="S.ui.editingNoteId=null; App.renderMain();" class="text-[11px] font-bold text-slate-500 px-2 py-1">Cancelar</button></div>
+                   </div>`
+                : (p.observaciones ? `<div class="mt-2 text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded-lg p-2 cursor-pointer" onclick="App.startEditNote('${p.id}')">${esc(p.observaciones)}</div>` : `<button onclick="App.startEditNote('${p.id}')" class="mt-2 text-[11px] font-semibold text-slate-500 hover:text-emerald-700">+ Agregar nota interna</button>`)}
+            </div>
+            <div class="flex sm:flex-col items-stretch gap-1.5 shrink-0 no-print">
+              <select onchange="App.updateEstado('${p.id}', this.value)" class="text-[11px] font-bold px-2 py-1.5 rounded-lg border ${ESTADO_COLORS[p.estado] || ''}">
+                ${['Pendiente', 'En Trámite', 'Atendido', 'Observado'].map(e => `<option value="${e}" ${p.estado === e ? 'selected' : ''}>${e}</option>`).join('')}
+              </select>
+              <div class="flex gap-1.5">
+                <button onclick="App.copyPedidoText('${p.id}')" title="Copiar texto formateado de WhatsApp" class="flex-1 p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600"><i data-lucide="copy" class="w-3.5 h-3.5 mx-auto"></i></button>
+                <button onclick="App.selectForEdit('${p.id}')" title="Editar" class="flex-1 p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600"><i data-lucide="pencil" class="w-3.5 h-3.5 mx-auto"></i></button>
+                <button onclick="App.deletePedido('${p.id}')" title="Eliminar registro" class="flex-1 p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600"><i data-lucide="trash-2" class="w-3.5 h-3.5 mx-auto"></i></button>
+              </div>
+            </div>
+          </div>
+        </div>`).join('')}
+      </div>`}
+    </div>`;
+  },
+
+  // ============================================================
+  // TAB: DIRECTORIO JUDICIAL
+  // ============================================================
+  setDirectorioSearch(v) { S.ui.directorioSearch = v; this.renderMain(); },
+  setDirectorioEspecialidad(v) { S.ui.directorioEspecialidad = v; this.renderMain(); },
+
+  selectJuzgadoEspecialista(nombre, especialista) {
+    S.currentPedido.juzgado = nombre;
+    S.currentPedido.especialista = especialista;
+    S.activeTab = 'nuevo';
+    this.toast('Seleccionado: ' + nombre + ' - ' + especialista);
+    this.renderAll();
+  },
+
+  async deleteJuzgado(id) {
+    if (!confirm('¿Eliminar este juzgado del directorio?')) return;
+    await gs('eliminarJuzgado', id);
+    S.juzgados = S.juzgados.filter(j => j.id !== id);
+    this.toast('Juzgado eliminado del directorio.');
+    this.renderMain();
+  },
+
+  async resetJuzgados() {
+    if (!confirm('¿Recargar el directorio con los datos originales? Se perderán los cambios manuales.')) return;
+    S.juzgados = await gs('restablecerJuzgados');
+    this.toast('Directorio restaurado con los datos iniciales.');
+    this.renderMain();
+  },
+
+  tplDirectorio() {
+    const q = S.ui.directorioSearch.toLowerCase();
+    const especialidades = [...new Set(S.juzgados.map(j => j.especialidad))];
+    const list = S.juzgados.filter(j => {
+      if (S.ui.directorioEspecialidad !== 'todos' && j.especialidad !== S.ui.directorioEspecialidad) return false;
+      if (!q) return true;
+      return (j.nombre || '').toLowerCase().includes(q) || (j.juez || '').toLowerCase().includes(q) || j.especialistas.some(e => e.toLowerCase().includes(q));
+    });
+    const isAdmin = S.viewMode === 'admin';
+
+    return `
+    <div class="space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+          <h2 class="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2"><i data-lucide="building-2" class="w-5 h-5 text-emerald-600"></i>Directorio de Juzgados</h2>
+          ${isAdmin ? `
+          <div class="flex items-center gap-2">
+            <button onclick="App.resetJuzgados()" title="Cargar datos originales" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1"><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>Restablecer</button>
+            <button onclick="App.openAddJuzgadoModal()" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1"><i data-lucide="plus" class="w-3.5 h-3.5"></i>Añadir Juzgado</button>
+          </div>` : ''}
+        </div>
+        <input type="text" value="${esc(S.ui.directorioSearch)}" oninput="App.setDirectorioSearch(this.value)" placeholder="Buscar por juzgado, juez o especialista..." class="w-full px-4 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none mb-2">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <button onclick="App.setDirectorioEspecialidad('todos')" class="px-2.5 py-1 rounded-full text-[11px] font-semibold ${S.ui.directorioEspecialidad === 'todos' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'}">Todos</button>
+          ${especialidades.map(e => `<button onclick="App.setDirectorioEspecialidad('${e}')" class="px-2.5 py-1 rounded-full text-[11px] font-semibold ${S.ui.directorioEspecialidad === e ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'}">${esc(e)}</button>`).join('')}
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        ${list.map(j => `
+        <div class="bg-white rounded-xl border border-slate-200/80 p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">${esc(j.especialidad)}</span>
+              <h3 class="text-sm font-bold text-slate-900 mt-1">${esc(j.nombre)}</h3>
+              <p class="text-[11px] text-slate-500">${esc(j.sede || '')}</p>
+              ${j.juez ? `<p class="text-[11px] text-slate-600 font-medium mt-0.5">${esc(j.juez)}</p>` : ''}
+            </div>
+            ${isAdmin ? `<div class="flex gap-1 shrink-0">
+              <button onclick="App.openAddJuzgadoModal('${j.id}')" title="Editar juzgado y especialistas" class="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button onclick="App.deleteJuzgado('${j.id}')" title="Eliminar juzgado" class="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>` : ''}
+          </div>
+          <div class="flex flex-wrap gap-1.5 mt-2.5">
+            ${j.especialistas.map(e => `<button onclick="App.selectJuzgadoEspecialista('${j.nombre.replace(/'/g, "\\'")}', '${e.replace(/'/g, "\\'")}')" class="text-[11px] px-2 py-1 rounded-lg bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 text-slate-700">${esc(e)}</button>`).join('') || '<span class="text-[11px] text-slate-400">Sin especialistas registrados</span>'}
+          </div>
+        </div>`).join('') || '<div class="col-span-2 text-center text-sm text-slate-500 py-10">No se encontraron juzgados.</div>'}
+      </div>
+    </div>`;
+  },
+
+  // ---- Modal Añadir/Editar Juzgado ----
+  openAddJuzgadoModal(id) {
+    S.ui.editingJuzgadoId = id || null;
+    const j = id ? S.juzgados.find(x => x.id === id) : null;
+    const root = document.getElementById('modal-root');
+    root.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4" onclick="if(event.target===this) App.closeModal()">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+        <div class="bg-slate-900 px-4 py-3 flex items-center justify-between"><h3 class="text-sm font-bold text-white">${j ? 'Editar' : 'Añadir'} Juzgado</h3><button onclick="App.closeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button></div>
+        <div class="p-4 space-y-3">
+          <div><label class="block text-xs font-bold text-slate-700 mb-1">Nombre del Juzgado</label><input id="aj-nombre" type="text" value="${esc(j ? j.nombre : '')}" placeholder="Ej: 10mo Juzgado Civil / 1er Juzgado de Trabajo" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Especialidad</label>
+              <select id="aj-especialidad" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">
+                ${['Civil', 'Laboral', 'Familia', 'Penal', 'Constitucional', 'Paz Letrado', 'Comercial', 'Otro'].map(e => `<option ${j && j.especialidad === e ? 'selected' : ''}>${e}</option>`).join('')}
+              </select>
+            </div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Sede</label><input id="aj-sede" type="text" value="${esc(j ? j.sede : 'Sede Central')}" placeholder="Ej: Sede Central / Palacio de Justicia" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+          </div>
+          <div><label class="block text-xs font-bold text-slate-700 mb-1">Juez</label><input id="aj-juez" type="text" value="${esc(j ? j.juez : '')}" placeholder="Ej: Dra. SALAS FLORES, ZORAIDA JULIA" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+          <div><label class="text-xs font-bold text-slate-700 flex items-center gap-1.5 mb-1">Especialistas (uno por línea)</label><textarea id="aj-especialistas" rows="5" placeholder="Francis Zegarra Cardenas&#10;GARCIA JURADO MARISOL" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg font-mono">${esc(j ? j.especialistas.join('\n') : '')}</textarea></div>
+        </div>
+        <div class="p-4 pt-0 flex gap-2 justify-end">
+          <button onclick="App.closeModal()" class="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancelar</button>
+          <button onclick="App.saveJuzgadoModal()" class="px-4 py-2 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg">Guardar</button>
+        </div>
+      </div>
+    </div>`;
+    lucide.createIcons();
+  },
+
+  async saveJuzgadoModal() {
+    const nombre = document.getElementById('aj-nombre').value.trim();
+    if (!nombre) { this.toast('El nombre del juzgado es obligatorio.'); return; }
+    const juzgado = {
+      id: S.ui.editingJuzgadoId || undefined,
+      nombre,
+      especialidad: document.getElementById('aj-especialidad').value,
+      sede: document.getElementById('aj-sede').value.trim(),
+      juez: document.getElementById('aj-juez').value.trim(),
+      especialistas: document.getElementById('aj-especialistas').value.split('\n').map(s => s.trim()).filter(Boolean)
+    };
+    try {
+      const saved = await gs('guardarJuzgado', juzgado);
+      saved.especialistas = juzgado.especialistas;
+      const idx = S.juzgados.findIndex(j => j.id === saved.id);
+      if (idx >= 0) S.juzgados[idx] = saved; else S.juzgados.unshift(saved);
+      this.toast('Juzgado ' + nombre + ' guardado.');
+      this.closeModal();
+      this.renderMain();
+    } catch (e) { this.toast('Error: ' + (e.message || e)); }
+  },
+
+  // ============================================================
+  // TAB: CONFIGURACIÓN
+  // ============================================================
+  tplConfiguracion() {
+    const c = S.config;
+    return `
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 overflow-hidden">
+      <div class="bg-gradient-to-r from-slate-900 to-slate-800 p-4 sm:p-6"><h2 class="text-xl font-bold text-white tracking-tight flex items-center gap-2"><i data-lucide="settings" class="w-5 h-5"></i>Configuración del Grupo</h2></div>
+      <div class="p-4 sm:p-6 space-y-6">
+
+        <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+          <h3 class="text-sm font-bold text-amber-950 uppercase tracking-wider flex items-center gap-2"><i data-lucide="key-round" class="w-4 h-4"></i>Cambiar contraseña de administrador</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Contraseña actual</label><input id="cfg-cur-pass" type="password" placeholder="admin123" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Nueva contraseña</label><input id="cfg-new-pass" type="password" placeholder="Mínimo 4 caracteres" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Confirmar nueva</label><input id="cfg-confirm-pass" type="password" placeholder="Repita nueva clave" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+          </div>
+          <div id="cfg-pass-msg" class="text-xs"></div>
+          <button onclick="App.changePassword()" class="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-500 rounded-lg">Actualizar Contraseña</button>
+        </div>
+
+        <div class="space-y-3">
+          <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider border-b border-slate-200 pb-2">Datos generales</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Nombre del grupo</label><input id="cfg-nombreGrupo" type="text" value="${esc(c.nombreGrupo)}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Saludo por defecto</label><input id="cfg-destinatarioDefault" type="text" value="${esc(c.destinatarioDefault)}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Teléfono del coordinador (WhatsApp)</label><input id="cfg-telefonoCoordinador" type="text" value="${esc(c.telefonoCoordinador)}" placeholder="51987654321" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+            <div><label class="block text-xs font-bold text-slate-700 mb-1">Enlace del grupo de WhatsApp</label><input id="cfg-enlaceGrupoWhatsapp" type="text" value="${esc(c.enlaceGrupoWhatsapp)}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider border-b border-slate-200 pb-2">Materias frecuentes</h3>
+          <div id="cfg-materias-list" class="flex flex-wrap gap-1.5">
+            ${(c.materiasFrecuentes || []).map((m, i) => `<span class="text-[11px] px-2 py-1 rounded-lg bg-slate-100 border border-slate-200 flex items-center gap-1">${esc(m)}<button onclick="App.removeMateria(${i})" class="text-slate-400 hover:text-red-600">×</button></span>`).join('')}
+          </div>
+          <div class="flex gap-2"><input id="cfg-nueva-materia" type="text" placeholder="Añadir materia..." class="flex-1 px-3 py-1.5 text-xs border border-slate-300 rounded-lg" onkeydown="if(event.key==='Enter'){App.addMateria(); event.preventDefault();}"><button onclick="App.addMateria()" class="px-3 py-1.5 text-xs font-bold bg-slate-800 text-white rounded-lg">Añadir</button></div>
+        </div>
+
+        <div class="space-y-2">
+          <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider border-b border-slate-200 pb-2">Tipos de trámite</h3>
+          <div class="space-y-2">
+            ${(c.tiposTramite || []).map((t, i) => `
+            <div class="flex flex-col sm:flex-row gap-2 items-start bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+              <input value="${esc(t.titulo)}" oninput="S.config.tiposTramite[${i}].titulo=this.value" class="flex-1 px-2 py-1.5 text-xs border border-slate-300 rounded-lg" placeholder="Título">
+              <input value="${esc(t.descripcion)}" oninput="S.config.tiposTramite[${i}].descripcion=this.value" class="flex-[2] px-2 py-1.5 text-xs border border-slate-300 rounded-lg" placeholder="Descripción breve de ayuda para los abogados...">
+              <button onclick="App.removeTipoTramite(${i})" class="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 shrink-0"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>`).join('')}
+          </div>
+          <button onclick="App.addTipoTramite()" class="px-3 py-1.5 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">+ Añadir tipo de trámite</button>
+        </div>
+
+        <div class="flex items-center gap-3 pt-2">
+          <button onclick="App.saveConfig()" class="px-5 py-2.5 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i>Guardar Configuración</button>
+          <button onclick="App.resetConfig()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl border border-slate-300">Restablecer valores por defecto</button>
+        </div>
+      </div>
+    </div>`;
+  },
+
+  addMateria() {
+    const input = document.getElementById('cfg-nueva-materia');
+    const val = input.value.trim();
+    if (!val) return;
+    S.config.materiasFrecuentes = S.config.materiasFrecuentes || [];
+    S.config.materiasFrecuentes.push(val);
+    this.renderMain();
+  },
+  removeMateria(i) { S.config.materiasFrecuentes.splice(i, 1); this.renderMain(); },
+  addTipoTramite() {
+    S.config.tiposTramite = S.config.tiposTramite || [];
+    S.config.tiposTramite.push({ id: Date.now(), titulo: 'Nuevo tipo de trámite', descripcion: '', icono: 'FileText', tagColor: 'slate' });
+    this.renderMain();
+  },
+  removeTipoTramite(i) { S.config.tiposTramite.splice(i, 1); this.renderMain(); },
+
+  async saveConfig() {
+    S.config.nombreGrupo = document.getElementById('cfg-nombreGrupo').value.trim();
+    S.config.destinatarioDefault = document.getElementById('cfg-destinatarioDefault').value.trim();
+    S.config.telefonoCoordinador = document.getElementById('cfg-telefonoCoordinador').value.trim();
+    S.config.enlaceGrupoWhatsapp = document.getElementById('cfg-enlaceGrupoWhatsapp').value.trim();
+    try {
+      S.config = await gs('guardarConfig', S.config);
+      this.toast('Configuración guardada en el servidor.');
+      this.renderAll();
+    } catch (e) { this.toast('Error guardando configuración: ' + (e.message || e)); }
+  },
+
+  async resetConfig() {
+    if (!confirm('¿Restablecer la configuración a los valores por defecto?')) return;
+    S.config = await gs('restablecerConfig');
+    this.toast('Configuración restablecida a valores iniciales.');
+    this.renderAll();
+  },
+
+  async changePassword() {
+    const cur = document.getElementById('cfg-cur-pass').value;
+    const nw = document.getElementById('cfg-new-pass').value;
+    const confirm2 = document.getElementById('cfg-confirm-pass').value;
+    const msgEl = document.getElementById('cfg-pass-msg');
+    if (nw !== confirm2) { msgEl.className = 'text-xs text-red-600'; msgEl.textContent = 'Las contraseñas nuevas no coinciden.'; return; }
+    try {
+      const res = await gs('cambiarPasswordAdmin', cur, nw);
+      msgEl.className = 'text-xs ' + (res.success ? 'text-emerald-700' : 'text-red-600');
+      msgEl.textContent = res.message;
+      if (res.success) {
+        document.getElementById('cfg-cur-pass').value = '';
+        document.getElementById('cfg-new-pass').value = '';
+        document.getElementById('cfg-confirm-pass').value = '';
+      }
+    } catch (e) { msgEl.className = 'text-xs text-red-600'; msgEl.textContent = 'Error: ' + (e.message || e); }
+  },
+
+  // ============================================================
+  // MODALES: Importador rápido / Compartir / Login admin
+  // ============================================================
+  closeModal() { document.getElementById('modal-root').innerHTML = ''; },
+
+  openImportModal() {
+    const root = document.getElementById('modal-root');
+    root.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4" onclick="if(event.target===this) App.closeModal()">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+        <div class="bg-slate-900 px-4 py-3 flex items-center justify-between"><h3 class="text-base font-bold text-white flex items-center gap-2"><i data-lucide="clipboard-paste" class="w-4 h-4 text-emerald-400"></i>Pegar mensaje de WhatsApp</h3><button onclick="App.closeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button></div>
+        <div class="p-4 space-y-3">
+          <label class="block text-xs font-bold text-slate-800 uppercase tracking-wider">Texto sin formato</label>
+          <textarea id="import-raw" rows="6" placeholder="Pegue aquí el mensaje tal como llegó a WhatsApp..." class="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono"></textarea>
+          <button onclick="App.runImport()" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg">Analizar y Autocompletar</button>
+          <div id="import-preview"></div>
+        </div>
+      </div>
+    </div>`;
+    lucide.createIcons();
+  },
+
+  runImport() {
+    const raw = document.getElementById('import-raw').value;
+    const parsed = parseRawWhatsAppMessage(raw);
+    S.ui.lastParsed = parsed;
+    const preview = document.getElementById('import-preview');
+    const fields = Object.keys(parsed);
+    preview.innerHTML = fields.length
+      ? `<div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs space-y-1">${fields.map(f => `<div><b>${esc(f)}:</b> ${esc(parsed[f])}</div>`).join('')}</div>
+         <button onclick="App.applyImport()" class="w-full mt-2 py-2 text-xs font-bold text-white bg-slate-900 rounded-lg">Aplicar al formulario</button>`
+      : '<div class="text-xs text-red-600">No se pudo extraer información reconocible del texto.</div>';
+  },
+
+  applyImport() {
+    const parsed = S.ui.lastParsed || {};
+    S.currentPedido = Object.assign({}, S.currentPedido, parsed);
+    S.activeTab = 'nuevo';
+    this.toast('Datos importados y cargados al formulario.');
+    this.closeModal();
+    this.renderAll();
+  },
+
+  openShareModal() {
+    const publicUrl = S.webAppUrl;
+    const adminUrl = S.webAppUrl + '?view=admin';
+    const broadcastMsg = 'Compañeros, ya está disponible la Mesa de Pedidos Judiciales para registrar y hacer seguimiento a nuestras solicitudes procesales: ' + publicUrl;
+    const root = document.getElementById('modal-root');
+    root.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4" onclick="if(event.target===this) App.closeModal()">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+        <div class="bg-slate-900 px-4 py-3 flex items-center justify-between"><h3 class="text-base font-bold text-white flex items-center gap-2"><i data-lucide="share-2" class="w-4 h-4 text-emerald-400"></i>Compartir enlaces</h3><button onclick="App.closeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button></div>
+        <div class="p-4 space-y-4">
+          <div><label class="block text-xs font-bold text-slate-800 mb-1">Enlace público (para los 500 miembros del grupo)</label>
+            <div class="flex gap-2"><input readonly value="${esc(publicUrl)}" class="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-lg bg-slate-50"><button onclick="App.copyToClipboard('${publicUrl}'); App.toast('Enlace público copiado.')" class="px-3 py-2 text-xs font-bold bg-slate-800 text-white rounded-lg">Copiar</button></div>
+          </div>
+          <div><label class="block text-xs font-bold text-amber-900 mb-1">Enlace de administrador (privado)</label>
+            <div class="flex gap-2"><input readonly value="${esc(adminUrl)}" class="flex-1 px-3 py-2 text-xs border border-amber-300 rounded-lg bg-amber-50"><button onclick="App.copyToClipboard('${adminUrl}'); App.toast('Enlace admin copiado.')" class="px-3 py-2 text-xs font-bold bg-amber-600 text-white rounded-lg">Copiar</button></div>
+          </div>
+          <div><label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Mensaje de difusión sugerido</label>
+            <div class="bg-[#0b141a] text-[#e9edef] text-xs rounded-xl p-3 whitespace-pre-wrap font-mono mb-2">${esc(broadcastMsg)}</div>
+            <button onclick="App.copyToClipboard(${JSON.stringify(broadcastMsg).replace(/"/g, '&quot;')}); App.toast('Mensaje de difusión copiado.')" class="w-full py-2 text-xs font-bold bg-emerald-600 text-white rounded-lg">Copiar mensaje de difusión</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    lucide.createIcons();
+  },
+
+  openLoginModal() {
+    const root = document.getElementById('modal-root');
+    root.innerHTML = `
+    <div class="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4" onclick="if(event.target===this) App.closeModal()">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden">
+        <div class="bg-slate-900 px-4 py-3 flex items-center justify-between"><h3 class="text-base font-bold text-white">Acceso Administrador</h3><button onclick="App.closeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button></div>
+        <div class="p-4 space-y-3">
+          <label class="block text-xs font-bold text-slate-700">Contraseña</label>
+          <input id="login-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter'){App.submitLogin(); event.preventDefault();}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">
+          <div id="login-error" class="text-xs text-red-600"></div>
+          <div class="flex gap-2 justify-end pt-1">
+            <button onclick="App.closeModal()" class="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancelar</button>
+            <button onclick="App.submitLogin()" class="px-4 py-2 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg">Ingresar</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    lucide.createIcons();
+    document.getElementById('login-password').focus();
+  },
+
+  async submitLogin() {
+    const pass = document.getElementById('login-password').value;
+    const errEl = document.getElementById('login-error');
+    try {
+      const res = await gs('loginAdmin', pass);
+      if (res.success) {
+        sessionStorage.setItem('admin_auth_token', res.token);
+        S.viewMode = 'admin';
+        S.activeTab = 'bandeja';
+        this.closeModal();
+        this.toast('¡Bienvenido al Panel de Administrador!');
+        this.renderAll();
+      } else {
+        errEl.textContent = res.message || 'Contraseña incorrecta';
+      }
+    } catch (e) { errEl.textContent = 'Error: ' + (e.message || e); }
+  },
+
+  adminLogout() {
+    sessionStorage.removeItem('admin_auth_token');
+    S.viewMode = 'public';
+    S.activeTab = 'nuevo';
+    this.toast('Sesión de Administrador cerrada.');
+    this.renderAll();
+  }
+};
+</script>
